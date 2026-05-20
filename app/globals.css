@@ -1,0 +1,92 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --bg: 246 247 251;
+  --elev: 255 255 255;
+  --ink: 15 23 42;
+  --soft: 71 85 105;
+  --muted: 148 163 184;
+  --line: 230 232 239;
+  --brand: 91 91 246;
+  --brand-2: 124 58 237;
+  --accent: 6 182 212;
+  --success: 16 185 129;
+  --warning: 245 158 11;
+  --danger: 239 68 68;
+  --pink: 236 72 153;
+  --font-sans: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', Roboto, sans-serif;
+}
+
+.dark {
+  --bg: 10 10 20;
+  --elev: 17 18 28;
+  --ink: 241 245 249;
+  --soft: 203 213 225;
+  --muted: 100 116 139;
+  --line: 31 34 51;
+  --brand: 129 140 248;
+  --brand-2: 167 139 250;
+  --accent: 34 211 238;
+}
+
+html, body { height: 100%; }
+body {
+  background: rgb(var(--bg));
+  color: rgb(var(--ink));
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Card primitive */
+.card { @apply bg-elev border border-line rounded-2xl p-5 shadow-soft; }
+.card:hover { @apply shadow-card; }
+
+/* Chip / pill */
+.pill { @apply inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-semibold; }
+.pill-green { @apply bg-success/10 text-success; }
+.pill-amber { @apply bg-warning/10 text-warning; }
+.pill-blue { @apply bg-accent/10 text-accent; }
+.pill-gray { @apply bg-muted/10 text-soft; }
+.pill-red { @apply bg-danger/10 text-danger; }
+
+/* Buttons */
+.btn { @apply inline-flex items-center gap-2 px-3.5 py-2 rounded-xl text-sm font-semibold border border-line bg-elev text-ink transition-all; }
+.btn:hover { @apply -translate-y-px shadow-soft; }
+.btn-primary { @apply bg-gradient-to-br from-brand to-brand-2 text-white border-transparent shadow-soft; }
+.btn-primary:hover { @apply shadow-card; }
+.btn-ghost { @apply border-transparent bg-transparent; }
+.btn-danger { @apply bg-danger/10 text-danger border-transparent; }
+.btn-sm { @apply px-2.5 py-1.5 text-xs rounded-lg; }
+
+/* Inputs */
+.input, .select, .textarea {
+  @apply w-full bg-bg border border-line rounded-xl px-3 py-2.5 text-sm text-ink outline-none transition-colors;
+}
+.input:focus, .select:focus, .textarea:focus { @apply border-brand; }
+.textarea { @apply min-h-[88px] resize-y; }
+.field-label { @apply block text-xs font-semibold text-soft mb-1.5; }
+
+/* Terminal */
+.term {
+  @apply bg-[#0b0d18] text-emerald-300 rounded-2xl p-4 font-mono text-[13px] leading-relaxed border border-line;
+  min-height: 200px;
+}
+.term .step { @apply text-emerald-400; }
+.term .out  { @apply text-slate-200 whitespace-pre-wrap; }
+.term .err  { @apply text-red-400; }
+
+/* Hide scrollbar in horizontal pills */
+.no-scrollbar::-webkit-scrollbar { display: none; }
+.no-scrollbar { scrollbar-width: none; }
+
+/* Chart card sizing — fixes the "graph too tall" issue. */
+.dashboard-chart { height: 220px; max-height: 240px; width: 100%; position: relative; }
+.chart-grid {
+  display: grid; gap: 16px;
+  grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+  align-items: stretch;
+}
+@media (max-width: 820px) { .dashboard-chart { height: 200px; max-height: 220px; } }
+@media (max-width: 640px) { .dashboard-chart { height: 180px; max-height: 200px; } }
