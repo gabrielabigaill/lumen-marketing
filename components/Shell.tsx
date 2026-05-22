@@ -3,6 +3,7 @@ import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { useEffect, useState } from 'react';
 import { getActiveAccountId, setActiveAccountId, onAccountChange, clearActiveAccount } from '@/lib/store';
+import { createSupabaseBrowser } from '@/lib/supabase/client';
 
 const NAV = [
   { href: '/', label: 'Account Select', icon: 'M3 12l9-9 9 9M5 10v10h14V10' },
@@ -26,13 +27,27 @@ export default function Shell({ children }: { children: React.ReactNode }) {
   const [active, setActive] = useState<string | null>(null);
   const [mobileNav, setMobileNav] = useState(false);
   const [dark, setDark] = useState(false);
+  const [userEmail, setUserEmail] = useState<string | null>(null);
 
   useEffect(() => {
     setDark(document.documentElement.classList.contains('dark'));
     setActive(getActiveAccountId());
     fetch('/api/accounts').then(r => r.json()).then(d => setAccounts(d.accounts ?? []));
-    return onAccountChange(id => setActive(id));
+    const sb = createSupabaseBrowser();
+    sb.auth.getUser().then(({ data }) => setUserEmail(data.user?.email ?? null));
+    const { data: sub } = sb.auth.onAuthStateChange((_e, session) => {
+      setUserEmail(session?.user?.email ?? null);
+    });
+    const off = onAccountChange(id => setActive(id));
+    return () => { sub.subscription.unsubscribe(); off(); };
   }, []);
+
+  async function signOut() {
+    const sb = createSupabaseBrowser();
+    await sb.auth.signOut();
+    setUserEmail(null);
+    router.push('/sign-in');
+  }
 
   useEffect(() => {
     // Guard: if no active account, send back to /
@@ -124,6 +139,14 @@ export default function Shell({ children }: { children: React.ReactNode }) {
                 : <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8z"/></svg>}
             </button>
             <button onClick={() => { clearActiveAccount(); router.push('/'); }} className="btn btn-sm">Switch account</button>
+            {userEmail ? (
+              <div className="flex items-center gap-2">
+                <span className="hidden md:inline pill pill-green text-[10px]" title={userEmail}>● {userEmail}</span>
+                <button onClick={signOut} className="btn btn-sm">Sign out</button>
+              </div>
+            ) : (
+              <Link href="/sign-in" className="btn btn-sm btn-primary">Sign in</Link>
+            )}
           </div>
         </header>
 
