@@ -39,71 +39,141 @@ export interface NormalizedPost {
   raw: Record<string, unknown>;
 }
 
-/** Run an actor and return the dataset items. Times out at 4 min. */
+// ----- Synchronous helpers (DEPRECATED for EdgeOne — keep for local/dev) -----
+
+/** Run an actor and return the dataset items. Times out at 4 min — too long for EdgeOne. */
 export async function runActor(actorId: string, input: unknown): Promise<{ runId: string; datasetId: string; items: any[] }> {
   const run = await apify().actor(actorId).call(input, { timeout: 240 });
   const { items } = await apify().dataset(run.defaultDatasetId).listItems();
   return { runId: run.id, datasetId: run.defaultDatasetId, items };
 }
 
-/** Scrape a profile + post sample for a given account. */
-export async function scrapeAccount(platform: Platform, handle: string) {
-  if (platform === 'instagram') return scrapeInstagram(handle);
-  if (platform === 'linkedin') return scrapeLinkedIn(handle);
+// ----- Async helpers (preferred — fit inside EdgeOne's 30s function ceiling) -----
+
+/** Start an actor run and return the run ID immediately (no waiting). */
+export async function startActor(actorId: string, input: unknown): Promise<string> {
+  const run = await apify().actor(actorId).start(input);
+  return run.id;
+}
+
+/** Fetch the current state of a run. */
+export async function getRun(runId: string) {
+  return apify().run(runId).get();
+}
+
+/** Fetch all items from a dataset. */
+export async function getDatasetItems(datasetId: string): Promise<any[]> {
+  const { items } = await apify().dataset(datasetId).listItems();
+  return items;
+}
+
+// ----- Plan + normalize -----
+
+export type SyncPlan =
+  | { kind: 'instagram'; username: string; profile_run_id: string; posts_run_id: string }
+  | { kind: 'linkedin'; handle: string; profile_run_id: string };
+
+/** Kick off the right actor(s) for an account and return the run IDs we need to poll. */
+export async function startSync(platform: Platform, handle: string): Promise<SyncPlan> {
+  if (platform === 'instagram') {
+    const username = handle.replace(/^@/, '');
+    const profileActor = process.env.APIFY_ACTOR_INSTAGRAM_PROFILE || 'apify/instagram-profile-scraper';
+    const postsActor = process.env.APIFY_ACTOR_INSTAGRAM_POSTS || 'apify/instagram-post-scraper';
+    const [profileRunId, postsRunId] = await Promise.all([
+      startActor(profileActor, { usernames: [username] }),
+      startActor(postsActor, { username: [username], resultsLimit: 24 }),
+    ]);
+    return { kind: 'instagram', username, profile_run_id: profileRunId, posts_run_id: postsRunId };
+  }
+  if (platform === 'linkedin') {
+    const actor = process.env.APIFY_ACTOR_LINKEDIN_PROFILE || 'apify/linkedin-profile-scraper';
+    const url = `https://www.linkedin.com/in/${handle}`;
+    const runId = await startActor(actor, { profileUrls: [url] });
+    return { kind: 'linkedin', handle, profile_run_id: runId };
+  }
   throw new Error(`Apify sync not implemented for platform: ${platform}`);
 }
 
-async function scrapeInstagram(handle: string) {
-  const profileActor = process.env.APIFY_ACTOR_INSTAGRAM_PROFILE || 'apify/instagram-profile-scraper';
-  const postsActor = process.env.APIFY_ACTOR_INSTAGRAM_POSTS || 'apify/instagram-post-scraper';
+const DONE_STATES = new Set(['SUCCEEDED']);
+const FAIL_STATES = new Set(['FAILED', 'ABORTED', 'TIMED-OUT']);
 
-  const username = handle.replace(/^@/, '');
+export type AggregatedState = 'running' | 'succeeded' | 'failed';
 
-  const profileRun = await runActor(profileActor, { usernames: [username] });
-  const p = profileRun.items[0] || {};
-
-  const profile: NormalizedProfile = {
-    followers: numOr(p.followersCount, null),
-    following: numOr(p.followsCount, null),
-    posts_count: numOr(p.postsCount, null),
-    bio: str(p.biography),
-    profile_url: str(p.url) ?? `https://instagram.com/${username}`,
-    raw: p,
-  };
-
-  const postsRun = await runActor(postsActor, { username: [username], resultsLimit: 24 });
-  const posts: NormalizedPost[] = (postsRun.items || []).map((it: any) => ({
-    external_id: str(it.id ?? it.shortCode),
-    url: str(it.url),
-    posted_at: str(it.timestamp),
-    content_type: mapIgType(it.type ?? it.productType),
-    caption: str(it.caption),
-    likes: numOr(it.likesCount, 0),
-    comments: numOr(it.commentsCount, 0),
-    shares: numOr(it.sharesCount, 0),
-    saves: numOr(it.savesCount, 0),
-    thumbnail_url: str(it.displayUrl ?? it.thumbnailSrc),
-    raw: it,
-  }));
-
-  return { runId: postsRun.runId, datasetId: postsRun.datasetId, profile, posts };
+/** Given a sync plan, return the combined state across its run(s). */
+export async function checkSyncState(plan: SyncPlan): Promise<{ state: AggregatedState; error?: string }> {
+  const ids = plan.kind === 'instagram'
+    ? [plan.profile_run_id, plan.posts_run_id]
+    : [plan.profile_run_id];
+  const runs = await Promise.all(ids.map(getRun));
+  if (runs.some(r => !r)) return { state: 'failed', error: 'Apify run not found.' };
+  if (runs.some(r => FAIL_STATES.has(r!.status))) {
+    const bad = runs.find(r => FAIL_STATES.has(r!.status))!;
+    return { state: 'failed', error: bad.statusMessage || `Run ${bad.id} ended ${bad.status}.` };
+  }
+  if (runs.every(r => DONE_STATES.has(r!.status))) {
+    return { state: 'succeeded' };
+  }
+  return { state: 'running' };
 }
 
-async function scrapeLinkedIn(handle: string) {
-  const actor = process.env.APIFY_ACTOR_LINKEDIN_PROFILE || 'apify/linkedin-profile-scraper';
-  const profileUrl = `https://www.linkedin.com/in/${handle}`;
-  const run = await runActor(actor, { profileUrls: [profileUrl] });
-  const p = run.items[0] || {};
+/** Once all runs have succeeded, pull the data and normalize. */
+export async function collectSyncResults(plan: SyncPlan): Promise<{
+  runId: string;
+  datasetId: string;
+  profile: NormalizedProfile;
+  posts: NormalizedPost[];
+}> {
+  if (plan.kind === 'instagram') {
+    const [profileRun, postsRun] = await Promise.all([
+      getRun(plan.profile_run_id),
+      getRun(plan.posts_run_id),
+    ]);
+    if (!profileRun || !postsRun) throw new Error('One of the Apify runs disappeared.');
+    const [profileItems, postsItems] = await Promise.all([
+      getDatasetItems(profileRun.defaultDatasetId),
+      getDatasetItems(postsRun.defaultDatasetId),
+    ]);
 
+    const p = profileItems[0] || {};
+    const profile: NormalizedProfile = {
+      followers: numOr(p.followersCount, null),
+      following: numOr(p.followsCount, null),
+      posts_count: numOr(p.postsCount, null),
+      bio: str(p.biography),
+      profile_url: str(p.url) ?? `https://instagram.com/${plan.username}`,
+      raw: p,
+    };
+
+    const posts: NormalizedPost[] = (postsItems || []).map((it: any) => ({
+      external_id: str(it.id ?? it.shortCode),
+      url: str(it.url),
+      posted_at: str(it.timestamp),
+      content_type: mapIgType(it.type ?? it.productType),
+      caption: str(it.caption),
+      likes: numOr(it.likesCount, 0),
+      comments: numOr(it.commentsCount, 0),
+      shares: numOr(it.sharesCount, 0),
+      saves: numOr(it.savesCount, 0),
+      thumbnail_url: str(it.displayUrl ?? it.thumbnailSrc),
+      raw: it,
+    }));
+
+    return { runId: postsRun.id, datasetId: postsRun.defaultDatasetId, profile, posts };
+  }
+
+  // linkedin
+  const run = await getRun(plan.profile_run_id);
+  if (!run) throw new Error('Apify LinkedIn run disappeared.');
+  const items = await getDatasetItems(run.defaultDatasetId);
+  const p = items[0] || {};
   const profile: NormalizedProfile = {
     followers: numOr(p.followers ?? p.connectionsCount, null),
     following: null,
     posts_count: numOr(p.postsCount, null),
     bio: str(p.about ?? p.headline),
-    profile_url: profileUrl,
+    profile_url: `https://www.linkedin.com/in/${plan.handle}`,
     raw: p,
   };
-
   const posts: NormalizedPost[] = (p.posts || []).map((it: any) => ({
     external_id: str(it.urn ?? it.id),
     url: str(it.url),
@@ -117,9 +187,10 @@ async function scrapeLinkedIn(handle: string) {
     thumbnail_url: str(it.image),
     raw: it,
   }));
-
-  return { runId: run.runId, datasetId: run.datasetId, profile, posts };
+  return { runId: run.id, datasetId: run.defaultDatasetId, profile, posts };
 }
+
+// ----- helpers -----
 
 function str(v: unknown): string | null {
   if (v === null || v === undefined) return null;
