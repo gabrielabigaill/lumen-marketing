@@ -1,12 +1,12 @@
-// POST /api/apify/finalize  { sync_id }
+// POST /api/apify/finalize  { account_id, plan }
 //
-// Polls the Apify runs tied to a sync row. Possible responses:
+// Polls the Apify runs in the supplied plan. Possible responses:
 //   - { status: 'running' }                 → keep polling
 //   - { status: 'succeeded', records: N }   → done; data has been upserted
 //   - { status: 'failed', error: '...' }    → done; sync failed
 //
-// Designed to return in well under 10s so it's safe to poll every 10s without
-// EdgeOne's 30s function ceiling biting.
+// Designed to return in well under 10s so it's safe to poll every 10s within
+// EdgeOne's 30s function ceiling.
 
 import { NextResponse } from 'next/server';
 import { createSupabaseServer, createSupabaseAdmin } from '@/lib/supabase/server';
@@ -20,24 +20,14 @@ export async function POST(req: Request) {
   const { data: { user } } = await sb.auth.getUser();
   if (!user) return NextResponse.json({ error: 'Not authenticated' }, { status: 401 });
 
-  const { sync_id } = await req.json();
-  if (!sync_id) return NextResponse.json({ error: 'sync_id required' }, { status: 400 });
+  const body = await req.json();
+  const account_id: string | undefined = body.account_id;
+  const plan: SyncPlan | undefined = body.plan;
+  if (!account_id || !plan) {
+    return NextResponse.json({ error: 'account_id and plan required' }, { status: 400 });
+  }
 
   const admin = createSupabaseAdmin();
-  const { data: sync } = await admin
-    .from('account_syncs').select('*').eq('id', sync_id).single();
-  if (!sync) return NextResponse.json({ error: 'Sync not found' }, { status: 404 });
-
-  if (sync.status === 'succeeded' || sync.status === 'failed') {
-    return NextResponse.json({ status: sync.status, error: sync.error ?? undefined });
-  }
-
-  let plan: SyncPlan;
-  try {
-    plan = JSON.parse(sync.run_id);
-  } catch {
-    return NextResponse.json({ error: 'Sync record is malformed' }, { status: 500 });
-  }
 
   try {
     const { state, error } = await checkSyncState(plan);
@@ -47,12 +37,11 @@ export async function POST(req: Request) {
     }
 
     if (state === 'failed') {
-      await admin.from('account_syncs').update({
-        status: 'failed', error: error ?? 'Apify run failed', finished_at: new Date().toISOString(),
-      }).eq('id', sync_id);
-      await admin.from('connected_accounts').update({
-        status: 'error', last_error: error ?? 'Apify run failed',
-      }).eq('id', sync.account_id);
+      try {
+        await admin.from('connected_accounts').update({
+          status: 'error', last_error: error ?? 'Apify run failed',
+        }).eq('id', account_id);
+      } catch { /* best effort */ }
       return NextResponse.json({ status: 'failed', error });
     }
 
@@ -66,8 +55,8 @@ export async function POST(req: Request) {
       ? Number(((totalEngagement / Math.max(1, result.posts.length)) / result.profile.followers * 100).toFixed(3))
       : null;
 
-    await admin.from('analytics_snapshots').upsert({
-      account_id: sync.account_id,
+    const { error: snapErr } = await admin.from('analytics_snapshots').upsert({
+      account_id,
       snapshot_date: today,
       followers: result.profile.followers,
       following: result.profile.following,
@@ -75,10 +64,13 @@ export async function POST(req: Request) {
       engagement_rate: er,
       raw: result.profile.raw,
     }, { onConflict: 'account_id,snapshot_date' });
+    if (snapErr) {
+      return NextResponse.json({ status: 'failed', error: `Snapshot upsert failed: ${snapErr.message}` }, { status: 500 });
+    }
 
     if (result.posts.length) {
       const rows = result.posts.map(p => ({
-        account_id: sync.account_id,
+        account_id,
         external_id: p.external_id,
         url: p.url,
         posted_at: p.posted_at,
@@ -92,32 +84,29 @@ export async function POST(req: Request) {
         engagement_rate: engagementRate(p, result.profile.followers),
         raw: p.raw,
       }));
-      await admin.from('posts').upsert(rows, { onConflict: 'account_id,external_id' });
+      const { error: postsErr } = await admin.from('posts').upsert(rows, { onConflict: 'account_id,external_id' });
+      if (postsErr) {
+        return NextResponse.json({ status: 'failed', error: `Posts upsert failed: ${postsErr.message}` }, { status: 500 });
+      }
     }
 
-    await admin.from('connected_accounts').update({
-      status: 'connected',
-      apify_dataset_id: result.datasetId,
-      last_synced_at: new Date().toISOString(),
-      last_error: null,
-    }).eq('id', sync.account_id);
+    try {
+      await admin.from('connected_accounts').update({
+        status: 'connected',
+        apify_dataset_id: result.datasetId,
+        last_synced_at: new Date().toISOString(),
+        last_error: null,
+      }).eq('id', account_id);
+    } catch { /* best effort */ }
 
-    await admin.from('account_syncs').update({
-      status: 'succeeded',
-      run_id: result.runId,
-      records_in: result.posts.length,
-      finished_at: new Date().toISOString(),
-    }).eq('id', sync_id);
-
-    return NextResponse.json({ ok: true, status: 'succeeded', records: result.posts.length });
+    return NextResponse.json({ ok: true, status: 'succeeded', records: result.posts.length, followers: result.profile.followers });
   } catch (err: any) {
     const message = err?.message ?? 'Finalize failed';
-    await admin.from('account_syncs').update({
-      status: 'failed', error: message, finished_at: new Date().toISOString(),
-    }).eq('id', sync_id);
-    await admin.from('connected_accounts').update({
-      status: 'error', last_error: message,
-    }).eq('id', sync.account_id);
+    try {
+      await admin.from('connected_accounts').update({
+        status: 'error', last_error: message,
+      }).eq('id', account_id);
+    } catch { /* best effort */ }
     return NextResponse.json({ status: 'failed', error: message }, { status: 500 });
   }
 }

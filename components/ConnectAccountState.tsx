@@ -44,12 +44,12 @@ export default function ConnectAccountState({ accountId, handle, platform, statu
     if (pollTimer.current) { clearInterval(pollTimer.current); pollTimer.current = null; }
   }
 
-  async function pollOnce(syncId: string) {
+  async function pollOnce(plan: any) {
     try {
       const res = await fetch('/api/apify/finalize', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sync_id: syncId }),
+        body: JSON.stringify({ account_id: accountId, plan }),
       });
       const data = await jsonOrThrow(res, 'Poll failed');
       if (data.status === 'running') {
@@ -83,13 +83,14 @@ export default function ConnectAccountState({ accountId, handle, platform, statu
         body: JSON.stringify({ account_id: accountId }),
       });
       const data = await jsonOrThrow(res, 'Sync failed');
-      const syncId: string = data.sync_id;
+      const plan = data.plan;
+      if (!plan) throw new Error('Sync started but no plan was returned by the server.');
       setPhase('polling');
       setProgress('Apify is scraping. This usually takes 30–90 seconds…');
 
       // Kick the first poll after 8s, then every 10s.
-      setTimeout(() => pollOnce(syncId), 8000);
-      pollTimer.current = setInterval(() => pollOnce(syncId), 10000);
+      setTimeout(() => pollOnce(plan), 8000);
+      pollTimer.current = setInterval(() => pollOnce(plan), 10000);
     } catch (e: any) {
       setPhase('error');
       setError(e?.message ?? 'Sync failed');
