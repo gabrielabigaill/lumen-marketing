@@ -6,14 +6,12 @@
 import { ApifyClient } from 'apify-client';
 import type { Platform } from './types';
 
-let _client: ApifyClient | null = null;
+// Don't cache the client — env var changes in EdgeOne should take effect on
+// the next request instead of being pinned to the cold-start value.
 export function apify(): ApifyClient {
-  if (!_client) {
-    const token = process.env.APIFY_TOKEN;
-    if (!token) throw new Error('APIFY_TOKEN is not configured');
-    _client = new ApifyClient({ token });
-  }
-  return _client;
+  const token = process.env.APIFY_TOKEN;
+  if (!token) throw new Error('APIFY_TOKEN is not configured');
+  return new ApifyClient({ token });
 }
 
 export interface NormalizedProfile {
