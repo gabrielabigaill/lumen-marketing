@@ -1,18 +1,56 @@
 // Apify integration layer.
-// Reuses one ApifyClient instance per cold start.
-// Each function normalizes Apify dataset items into our DB shape so the rest
-// of the app never has to know which actor returned what.
+//
+// We talk to Apify via raw fetch() (not the apify-client SDK) because EdgeOne's
+// edge runtime strips outbound `Authorization` headers as a credential-leak
+// safeguard. The SDK puts the token in `Authorization: Bearer <token>`, so all
+// requests reach Apify with no auth and come back as "Invalid API key".
+// Putting the token in the URL query string (`?token=…`) avoids the header
+// entirely and works on every runtime.
 
-import { ApifyClient } from 'apify-client';
 import type { Platform } from './types';
 
-// Don't cache the client — env var changes in EdgeOne should take effect on
-// the next request instead of being pinned to the cold-start value.
-export function apify(): ApifyClient {
+const APIFY_BASE = 'https://api.apify.com/v2';
+
+function tokenOrThrow(): string {
   const token = process.env.APIFY_TOKEN;
   if (!token) throw new Error('APIFY_TOKEN is not configured');
-  return new ApifyClient({ token });
+  return token;
 }
+
+async function apifyFetch<T = any>(
+  path: string,
+  init: RequestInit & { rawBody?: any } = {},
+): Promise<T> {
+  const token = tokenOrThrow();
+  const sep = path.includes('?') ? '&' : '?';
+  const url = `${APIFY_BASE}${path}${sep}token=${encodeURIComponent(token)}`;
+
+  const headers: Record<string, string> = { Accept: 'application/json' };
+  let body: BodyInit | undefined;
+  if (init.rawBody !== undefined) {
+    headers['Content-Type'] = 'application/json';
+    body = JSON.stringify(init.rawBody);
+  }
+
+  const res = await fetch(url, {
+    method: init.method ?? 'GET',
+    headers: { ...headers, ...(init.headers as Record<string, string> | undefined) },
+    body,
+  });
+
+  // Apify returns JSON for both success + error. Surface error.message verbatim.
+  const text = await res.text();
+  let json: any;
+  try { json = text ? JSON.parse(text) : {}; } catch { json = { _raw: text }; }
+
+  if (!res.ok) {
+    const msg = json?.error?.message ?? json?.error ?? json?.message ?? `Apify ${res.status} ${res.statusText}`;
+    throw new Error(`Apify error: ${msg}`);
+  }
+  return (json?.data ?? json) as T;
+}
+
+// ----- Types -----
 
 export interface NormalizedProfile {
   followers: number | null;
@@ -37,41 +75,50 @@ export interface NormalizedPost {
   raw: Record<string, unknown>;
 }
 
-// ----- Synchronous helpers (DEPRECATED for EdgeOne — keep for local/dev) -----
-
-/** Run an actor and return the dataset items. Times out at 4 min — too long for EdgeOne. */
-export async function runActor(actorId: string, input: unknown): Promise<{ runId: string; datasetId: string; items: any[] }> {
-  const run = await apify().actor(actorId).call(input, { timeout: 240 });
-  const { items } = await apify().dataset(run.defaultDatasetId).listItems();
-  return { runId: run.id, datasetId: run.defaultDatasetId, items };
+interface ApifyRun {
+  id: string;
+  status: string;
+  statusMessage?: string;
+  defaultDatasetId: string;
 }
 
-// ----- Async helpers (preferred — fit inside EdgeOne's 30s function ceiling) -----
+// ----- Low-level helpers -----
 
-/** Start an actor run and return the run ID immediately (no waiting). */
+/** Start an actor and return the run ID. Doesn't wait. */
 export async function startActor(actorId: string, input: unknown): Promise<string> {
-  const run = await apify().actor(actorId).start(input);
+  // Apify accepts actor IDs as either `username/actor-name` (which it slugs to
+  // `username~actor-name`) or the raw `id`. Always normalize slashes to `~`.
+  const slug = actorId.replace('/', '~');
+  const run = await apifyFetch<ApifyRun>(`/acts/${slug}/runs`, {
+    method: 'POST',
+    rawBody: input,
+  });
   return run.id;
 }
 
-/** Fetch the current state of a run. */
-export async function getRun(runId: string) {
-  return apify().run(runId).get();
+/** Get the current state of a run. */
+export async function getRun(runId: string): Promise<ApifyRun | null> {
+  try {
+    return await apifyFetch<ApifyRun>(`/actor-runs/${encodeURIComponent(runId)}`);
+  } catch (err: any) {
+    if (String(err.message).includes('404')) return null;
+    throw err;
+  }
 }
 
 /** Fetch all items from a dataset. */
 export async function getDatasetItems(datasetId: string): Promise<any[]> {
-  const { items } = await apify().dataset(datasetId).listItems();
-  return items;
+  const items = await apifyFetch<any[]>(`/datasets/${encodeURIComponent(datasetId)}/items?clean=true&format=json`);
+  return Array.isArray(items) ? items : [];
 }
 
-// ----- Plan + normalize -----
+// ----- High-level orchestration -----
 
 export type SyncPlan =
   | { kind: 'instagram'; username: string; profile_run_id: string; posts_run_id: string }
   | { kind: 'linkedin'; handle: string; profile_run_id: string };
 
-/** Kick off the right actor(s) for an account and return the run IDs we need to poll. */
+/** Kick off the right actor(s) for an account and return the run IDs to poll. */
 export async function startSync(platform: Platform, handle: string): Promise<SyncPlan> {
   if (platform === 'instagram') {
     const username = handle.replace(/^@/, '');
@@ -93,7 +140,7 @@ export async function startSync(platform: Platform, handle: string): Promise<Syn
 }
 
 const DONE_STATES = new Set(['SUCCEEDED']);
-const FAIL_STATES = new Set(['FAILED', 'ABORTED', 'TIMED-OUT']);
+const FAIL_STATES = new Set(['FAILED', 'ABORTED', 'TIMED-OUT', 'TIMED_OUT']);
 
 export type AggregatedState = 'running' | 'succeeded' | 'failed';
 
