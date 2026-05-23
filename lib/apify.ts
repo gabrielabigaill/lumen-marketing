@@ -44,8 +44,11 @@ async function apifyFetch<T = any>(
   try { json = text ? JSON.parse(text) : {}; } catch { json = { _raw: text }; }
 
   if (!res.ok) {
-    const msg = json?.error?.message ?? json?.error ?? json?.message ?? `Apify ${res.status} ${res.statusText}`;
-    throw new Error(`Apify error: ${msg}`);
+    const apifyMsg = json?.error?.message ?? json?.error ?? json?.message ?? `${res.status} ${res.statusText}`;
+    // Sentinel "[fetchv4]" lets us confirm at a glance which code path is running.
+    // Also surface token prefix/suffix so we can verify what the function is using.
+    const tokPreview = token ? `${token.slice(0, 8)}…${token.slice(-4)}` : '(no token)';
+    throw new Error(`[fetchv4] Apify ${res.status} @ ${path} (token ${tokPreview}): ${apifyMsg}`);
   }
   return (json?.data ?? json) as T;
 }
