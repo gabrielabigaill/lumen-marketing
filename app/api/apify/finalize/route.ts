@@ -9,17 +9,13 @@
 // EdgeOne's 30s function ceiling.
 
 import { NextResponse } from 'next/server';
-import { createSupabaseServer, createSupabaseAdmin } from '@/lib/supabase/server';
+import { createSupabaseAdmin } from '@/lib/supabase/server';
 import { checkSyncState, collectSyncResults, engagementRate, type SyncPlan } from '@/lib/apify';
 
 export const runtime = 'nodejs';
 export const maxDuration = 30;
 
 export async function POST(req: Request) {
-  const sb = createSupabaseServer();
-  const { data: { user } } = await sb.auth.getUser();
-  if (!user) return NextResponse.json({ error: 'Not authenticated' }, { status: 401 });
-
   const body = await req.json();
   const account_id: string | undefined = body.account_id;
   const plan: SyncPlan | undefined = body.plan;
@@ -96,8 +92,10 @@ export async function POST(req: Request) {
         apify_dataset_id: result.datasetId,
         last_synced_at: new Date().toISOString(),
         last_error: null,
+        profile_pic_url: result.profile.profile_pic_url ?? null,
+        followers_cache: result.profile.followers ?? null,
       }).eq('id', account_id);
-    } catch { /* best effort */ }
+    } catch { /* best effort — column may not exist yet, see migration in supabase/migrations/0002 */ }
 
     return NextResponse.json({ ok: true, status: 'succeeded', records: result.posts.length, followers: result.profile.followers });
   } catch (err: any) {

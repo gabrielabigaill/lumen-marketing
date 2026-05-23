@@ -1,7 +1,6 @@
 'use client';
-// Account selection — the entry point.
-// Until Supabase auth is wired the API falls back to ACCOUNT_SEEDS, which lets
-// this screen render usefully even on a fresh deploy with no DB rows.
+// Account selection — the entry point. No sign-in required; the site is
+// shareable across devices and the API returns shared accounts to everyone.
 
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
@@ -14,6 +13,8 @@ interface Acct {
   display_name: string;
   profile_type: string;
   status: string;
+  profile_pic_url?: string | null;
+  followers_cache?: number | null;
   last_synced_at: string | null;
 }
 
@@ -24,16 +25,21 @@ const accent: Record<string, string> = {
   'linkedin:judithbemnet': 'from-sky-500 to-blue-700',
 };
 
+function fmtFollowers(n: number | null | undefined) {
+  if (n == null) return null;
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M';
+  if (n >= 1_000) return (n / 1_000).toFixed(1) + 'K';
+  return n.toLocaleString();
+}
+
 export default function AccountSelectPage() {
   const router = useRouter();
   const [accounts, setAccounts] = useState<Acct[]>([]);
   const [loading, setLoading] = useState(true);
-  const [auth, setAuth] = useState(false);
 
   useEffect(() => {
     fetch('/api/accounts').then(r => r.json()).then(d => {
       setAccounts(d.accounts ?? []);
-      setAuth(!!d.authenticated);
     }).finally(() => setLoading(false));
   }, []);
 
@@ -60,6 +66,7 @@ export default function AccountSelectPage() {
               const key = `${a.platform}:${a.handle.toLowerCase()}`;
               const grad = accent[key] ?? 'from-slate-500 to-slate-700';
               const connected = a.status === 'connected';
+              const followers = fmtFollowers(a.followers_cache);
               return (
                 <button
                   key={a.id}
@@ -67,8 +74,20 @@ export default function AccountSelectPage() {
                   className="card text-left group hover:border-brand transition-all"
                 >
                   <div className="flex items-start gap-4">
-                    <div className={`w-14 h-14 rounded-2xl bg-gradient-to-br ${grad} grid place-items-center text-white text-xl font-bold shadow-soft shrink-0`}>
-                      {a.platform === 'linkedin' ? 'in' : a.handle.charAt(0).toUpperCase()}
+                    <div className={`w-14 h-14 rounded-2xl bg-gradient-to-br ${grad} grid place-items-center text-white text-xl font-bold shadow-soft shrink-0 overflow-hidden`}>
+                      {a.profile_pic_url ? (
+                        // eslint-disable-next-line @next/next/no-img-element
+                        <img
+                          src={a.profile_pic_url}
+                          alt={a.display_name}
+                          referrerPolicy="no-referrer"
+                          loading="lazy"
+                          className="w-full h-full object-cover"
+                          onError={e => { (e.currentTarget as HTMLImageElement).style.display = 'none'; }}
+                        />
+                      ) : (
+                        a.platform === 'linkedin' ? 'in' : a.handle.charAt(0).toUpperCase()
+                      )}
                     </div>
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-2 flex-wrap">
@@ -80,7 +99,9 @@ export default function AccountSelectPage() {
                       <p className="text-xs text-muted capitalize mt-0.5">{a.platform}</p>
                       <p className="text-xs text-soft mt-2">{a.profile_type}</p>
                       <p className="text-[11px] text-muted mt-3">
-                        {a.last_synced_at ? `Last synced ${new Date(a.last_synced_at).toLocaleString()}` : 'No sync yet — run from Connections.'}
+                        {followers
+                          ? `${followers} followers · ${a.last_synced_at ? `synced ${new Date(a.last_synced_at).toLocaleString()}` : 'no sync yet'}`
+                          : (a.last_synced_at ? `Last synced ${new Date(a.last_synced_at).toLocaleString()}` : 'No sync yet — run from Connections.')}
                       </p>
                     </div>
                     <svg className="w-5 h-5 text-muted group-hover:text-brand transition-colors" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -91,12 +112,6 @@ export default function AccountSelectPage() {
               );
             })}
           </div>
-        )}
-
-        {!auth && !loading && (
-          <p className="text-xs text-muted text-center mt-8">
-            You're browsing as a guest — sign in to persist your account selections and sync real data.
-          </p>
         )}
       </div>
     </main>

@@ -1,22 +1,14 @@
 // Single reusable Claude service. Used by:
 //   - /api/ai/generate       (AI Studio)
 //   - /api/reports/generate  (AI summaries on reports)
-// Keep prompt building here so account context is consistent everywhere.
+//
+// Uses raw fetch() against api.anthropic.com to avoid SDK + edge-runtime
+// header-stripping headaches. Same pattern as lib/apify.ts.
 
-import Anthropic from '@anthropic-ai/sdk';
 import type { AiKind, ConnectedAccount, AnalyticsSnapshot } from './types';
 
-let _client: Anthropic | null = null;
-export function claude(): Anthropic {
-  if (!_client) {
-    const apiKey = process.env.ANTHROPIC_API_KEY;
-    if (!apiKey) throw new Error('ANTHROPIC_API_KEY is not configured');
-    _client = new Anthropic({ apiKey });
-  }
-  return _client;
-}
-
-export const DEFAULT_MODEL = process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-6';
+const ANTHROPIC_BASE = 'https://api.anthropic.com/v1';
+export const DEFAULT_MODEL = process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-5';
 
 export interface AccountContext {
   account: Pick<ConnectedAccount, 'platform' | 'handle' | 'display_name' | 'profile_type'>;
@@ -57,11 +49,11 @@ function systemPrompt(input: GenerateInputs): string {
 const TEMPLATES: Record<AiKind, (i: GenerateInputs) => string> = {
   ig_caption: i => `Write 3 Instagram caption options for "${i.topic ?? i.brief ?? 'this post'}".
 Tone: ${i.tone ?? 'authentic, premium'}. Goal: ${i.goal ?? 'engagement'}. CTA: ${i.cta ?? 'authentic'}.
-Each caption: hook line, 2–4 short paragraphs, single clear CTA, ≤6 relevant hashtags. Number them 1/2/3.`,
+Each caption: hook line, 2-4 short paragraphs, single clear CTA, ≤6 relevant hashtags. Number them 1/2/3.`,
 
   li_post: i => `Write 2 LinkedIn post options for "${i.topic ?? i.brief}".
 Tone: ${i.tone ?? 'executive, confident'}. Goal: ${i.goal ?? 'thought leadership'}.
-Each post: contrarian or specific hook, 4–7 short lines with line breaks, end with a single question to drive comments.`,
+Each post: contrarian or specific hook, 4-7 short lines with line breaks, end with a single question to drive comments.`,
 
   li_article: i => `Outline a LinkedIn article on "${i.topic ?? i.brief}".
 Sections: Hook · Thesis · 3 supporting arguments with one specific example each · Counter-take · CTA.
@@ -90,19 +82,45 @@ Output: (1) one-sentence concept, (2) tagline, (3) 3 narrative pillars, (4) hero
 
 /** Single-shot generation. Returns plain text. */
 export async function generate(input: GenerateInputs): Promise<{ text: string; tokens_in?: number; tokens_out?: number; model: string }> {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) throw new Error('ANTHROPIC_API_KEY is not configured');
+
   const prompt = TEMPLATES[input.kind](input);
   const model = DEFAULT_MODEL;
-  const res = await claude().messages.create({
-    model,
-    max_tokens: 1400,
-    system: systemPrompt(input),
-    messages: [{ role: 'user', content: prompt }],
+
+  const res = await fetch(`${ANTHROPIC_BASE}/messages`, {
+    method: 'POST',
+    headers: {
+      'x-api-key': apiKey,
+      'anthropic-version': '2023-06-01',
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({
+      model,
+      max_tokens: 1400,
+      system: systemPrompt(input),
+      messages: [{ role: 'user', content: prompt }],
+    }),
   });
-  const text = res.content
-    .map(c => (c.type === 'text' ? c.text : ''))
+
+  const text = await res.text();
+  let json: any;
+  try { json = text ? JSON.parse(text) : {}; } catch { json = { _raw: text }; }
+
+  if (!res.ok) {
+    const msg = json?.error?.message ?? json?.error?.type ?? `${res.status} ${res.statusText}`;
+    throw new Error(`[claudev2] Anthropic ${res.status}: ${msg}`);
+  }
+
+  const out = (json?.content ?? [])
+    .map((c: any) => (c?.type === 'text' ? c.text : ''))
     .join('\n')
     .trim();
-  return { text, tokens_in: res.usage?.input_tokens, tokens_out: res.usage?.output_tokens, model };
-}
 
-// Workflow steps removed.
+  return {
+    text: out,
+    tokens_in: json?.usage?.input_tokens,
+    tokens_out: json?.usage?.output_tokens,
+    model: json?.model ?? model,
+  };
+}

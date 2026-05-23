@@ -61,6 +61,7 @@ export interface NormalizedProfile {
   posts_count: number | null;
   bio: string | null;
   profile_url: string | null;
+  profile_pic_url: string | null;
   raw: Record<string, unknown>;
 }
 
@@ -189,6 +190,7 @@ export async function collectSyncResults(plan: SyncPlan): Promise<{
       posts_count: numOr(p.postsCount, null),
       bio: str(p.biography),
       profile_url: str(p.url) ?? `https://instagram.com/${plan.username}`,
+      profile_pic_url: str(p.profilePicUrlHD ?? p.profilePicUrl ?? p.profile_pic_url),
       raw: p,
     };
 
@@ -220,6 +222,7 @@ export async function collectSyncResults(plan: SyncPlan): Promise<{
     posts_count: numOr(p.postsCount, null),
     bio: str(p.about ?? p.headline),
     profile_url: `https://www.linkedin.com/in/${plan.handle}`,
+    profile_pic_url: str(p.profilePicture ?? p.profilePictureUrl ?? p.pictureUrl ?? p.imageUrl),
     raw: p,
   };
   const posts: NormalizedPost[] = (p.posts || []).map((it: any) => ({

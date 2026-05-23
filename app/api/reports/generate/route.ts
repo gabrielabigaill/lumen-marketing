@@ -1,29 +1,28 @@
 // POST /api/reports/generate
 // Body: { account_id, kind, range_start, range_end, campaign_id? }
 // Aggregates real data (snapshots + posts) and asks Claude for an exec summary.
+// No auth — shared site across devices.
+
 import { NextResponse } from 'next/server';
-import { createSupabaseServer } from '@/lib/supabase/server';
+import { createSupabaseAdmin } from '@/lib/supabase/server';
 import { generate } from '@/lib/ai';
 
 export const runtime = 'nodejs';
 export const maxDuration = 60;
 
 export async function POST(req: Request) {
-  const sb = createSupabaseServer();
-  const { data: { user } } = await sb.auth.getUser();
-  if (!user) return NextResponse.json({ error: 'Not authenticated' }, { status: 401 });
-
   const { account_id, kind, range_start, range_end, campaign_id } = await req.json();
   if (!account_id || !kind || !range_start || !range_end) {
     return NextResponse.json({ error: 'account_id, kind, range_start, range_end required' }, { status: 400 });
   }
 
+  const admin = createSupabaseAdmin();
   const [{ data: account }, { data: snapshots }, { data: posts }] = await Promise.all([
-    sb.from('connected_accounts').select('*').eq('id', account_id).single(),
-    sb.from('analytics_snapshots').select('*').eq('account_id', account_id)
+    admin.from('connected_accounts').select('*').eq('id', account_id).single(),
+    admin.from('analytics_snapshots').select('*').eq('account_id', account_id)
       .gte('snapshot_date', range_start).lte('snapshot_date', range_end)
       .order('snapshot_date', { ascending: true }),
-    sb.from('posts').select('*').eq('account_id', account_id)
+    admin.from('posts').select('*').eq('account_id', account_id)
       .gte('posted_at', range_start).lte('posted_at', range_end + 'T23:59:59')
       .order('engagement_rate', { ascending: false, nullsFirst: false }),
   ]);
@@ -41,6 +40,7 @@ export async function POST(req: Request) {
   };
 
   let ai_summary: string | null = null;
+  let ai_error: string | null = null;
   try {
     const { text } = await generate({
       kind: 'report',
@@ -55,20 +55,22 @@ export async function POST(req: Request) {
     });
     ai_summary = text;
   } catch (err: any) {
-    ai_summary = null; // report still works without AI
+    ai_error = err?.message ?? 'AI summary failed';
   }
 
-  const { data: report, error } = await sb.from('reports').insert({
-    user_id: user.id,
-    account_id,
-    campaign_id: campaign_id ?? null,
-    kind,
-    range_start,
-    range_end,
-    data: { totals, snapshots, post_count: posts?.length ?? 0 },
-    ai_summary,
-  }).select().single();
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-
-  return NextResponse.json({ report, totals, ai_summary });
+  try {
+    const { data: report } = await admin.from('reports').insert({
+      user_id: null,
+      account_id,
+      campaign_id: campaign_id ?? null,
+      kind,
+      range_start,
+      range_end,
+      data: { totals, snapshots, post_count: posts?.length ?? 0 },
+      ai_summary,
+    }).select().single();
+    return NextResponse.json({ report, totals, ai_summary, ai_error });
+  } catch {
+    return NextResponse.json({ report: null, totals, ai_summary, ai_error });
+  }
 }

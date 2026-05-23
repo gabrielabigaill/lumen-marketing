@@ -1,25 +1,23 @@
 // GET /api/analytics/[accountId]?range=30
 // Returns snapshots + top posts + engagement series for the chosen account.
+// No auth — shared across devices.
 import { NextResponse } from 'next/server';
-import { createSupabaseServer } from '@/lib/supabase/server';
+import { createSupabaseAdmin } from '@/lib/supabase/server';
 
 export const runtime = 'nodejs';
 
 export async function GET(req: Request, { params }: { params: { accountId: string } }) {
-  const sb = createSupabaseServer();
-  const { data: { user } } = await sb.auth.getUser();
-  if (!user) return NextResponse.json({ error: 'Not authenticated' }, { status: 401 });
-
+  const admin = createSupabaseAdmin();
   const url = new URL(req.url);
   const days = Math.min(180, Number(url.searchParams.get('range') ?? 30));
   const since = new Date(Date.now() - days * 86400e3).toISOString().slice(0, 10);
 
   const [{ data: account }, { data: snapshots }, { data: topPosts }] = await Promise.all([
-    sb.from('connected_accounts').select('*').eq('id', params.accountId).single(),
-    sb.from('analytics_snapshots')
+    admin.from('connected_accounts').select('*').eq('id', params.accountId).single(),
+    admin.from('analytics_snapshots')
       .select('*').eq('account_id', params.accountId).gte('snapshot_date', since)
       .order('snapshot_date', { ascending: true }),
-    sb.from('posts')
+    admin.from('posts')
       .select('*').eq('account_id', params.accountId)
       .order('engagement_rate', { ascending: false, nullsFirst: false })
       .limit(5),

@@ -6,17 +6,13 @@
 // /api/apify/finalize with the returned plan until the run(s) succeed.
 
 import { NextResponse } from 'next/server';
-import { createSupabaseServer, createSupabaseAdmin } from '@/lib/supabase/server';
+import { createSupabaseAdmin } from '@/lib/supabase/server';
 import { startSync } from '@/lib/apify';
 
 export const runtime = 'nodejs';
 export const maxDuration = 30;
 
 export async function POST(req: Request) {
-  const sb = createSupabaseServer();
-  const { data: { user } } = await sb.auth.getUser();
-  if (!user) return NextResponse.json({ error: 'Not authenticated' }, { status: 401 });
-
   const { account_id } = await req.json();
   if (!account_id) return NextResponse.json({ error: 'account_id required' }, { status: 400 });
 
