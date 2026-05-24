@@ -17,7 +17,7 @@ const TOOLS: Array<{ kind: ToolKind; title: string; desc: string; emoji: string;
   { kind: 'graphic_brief', title: 'Graphic Brief',        desc: 'Designer-ready creative brief.',        emoji: '🎨', group: 'text'  },
   { kind: 'hashtags',      title: 'Hashtag Set',          desc: 'Core / Growth / Niche groups.',         emoji: '#',  group: 'text'  },
   { kind: 'repurpose',     title: 'Repurposing Plan',     desc: '1 piece → 8 derivatives.',              emoji: '♻️', group: 'text'  },
-  { kind: 'graphic_image', title: 'Graphic Generator',    desc: 'Generate a downloadable image (Gemini).', emoji: '🖼️', group: 'image' },
+  { kind: 'graphic_image', title: 'Graphic Generator',    desc: 'AI-generated PNG you can download.',    emoji: '🖼️', group: 'image' },
 ];
 
 export default function AiStudioPage() {
@@ -42,6 +42,7 @@ export default function AiStudioPage() {
 
   // Image output
   const [imageUrl, setImageUrl] = useState<string | null>(null);
+  const [imageProvider, setImageProvider] = useState<string | null>(null);
   const [imageBusy, setImageBusy] = useState(false);
   const [imageErr, setImageErr] = useState<string | null>(null);
   const [aspect, setAspect] = useState<'1:1' | '9:16' | '16:9'>('1:1');
@@ -67,7 +68,7 @@ export default function AiStudioPage() {
   }
 
   async function generateImage() {
-    setImageBusy(true); setImageErr(null); setImageUrl(null);
+    setImageBusy(true); setImageErr(null); setImageUrl(null); setImageProvider(null);
     try {
       const promptText = (topic || brief || '').trim();
       if (!promptText) throw new Error('Add a topic or brief first.');
@@ -84,6 +85,7 @@ export default function AiStudioPage() {
       const data = await res.json();
       if (!res.ok || !data.image) throw new Error(data.error ?? 'Image generation failed');
       setImageUrl(data.image);
+      setImageProvider(data.provider ?? null);
     } catch (e: any) { setImageErr(e?.message ?? 'Image generation failed'); }
     finally { setImageBusy(false); }
   }
@@ -161,7 +163,7 @@ export default function AiStudioPage() {
               <p className="text-[11px] text-muted mt-0.5 leading-relaxed">{t.desc}</p>
               {isImg && (
                 <span className="absolute bottom-2.5 right-2.5 text-[9px] uppercase tracking-wider font-bold text-amber-500">
-                  Gemini
+                  FLUX · Free
                 </span>
               )}
             </button>
@@ -265,22 +267,21 @@ export default function AiStudioPage() {
               </div>
               <div className="flex gap-2 pt-2">
                 <button onClick={generateImage} disabled={imageBusy} className="btn btn-primary flex-1 justify-center">
-                  {imageBusy ? 'Asking Gemini…' : '✨ Generate graphic'}
+                  {imageBusy ? 'Generating image…' : '✨ Generate graphic'}
                 </button>
                 <button onClick={() => { setImageUrl(null); setImageErr(null); }} className="btn btn-danger">Clear</button>
               </div>
               <p className="text-[10px] text-muted">
-                Needs <code className="bg-bg px-1 rounded">GEMINI_API_KEY</code> set in EdgeOne. Free at{' '}
-                <a className="text-brand underline" href="https://aistudio.google.com/app/apikey" target="_blank" rel="noreferrer">
-                  aistudio.google.com/app/apikey
-                </a>.
+                Default provider: <strong>Pollinations.ai</strong> (FLUX.1) — free, no key required.
+                Add <code className="bg-bg px-1 rounded">HF_TOKEN</code> for higher-quality FLUX via Hugging Face, or
+                <code className="bg-bg px-1 rounded ml-1">GEMINI_API_KEY</code> (paid tier) for Imagen.
               </p>
             </div>
           </div>
 
           <div className="card">
             <div className="flex items-center justify-between mb-3">
-              <h3 className="font-semibold text-sm">Generated graphic</h3>
+              <h3 className="font-semibold text-sm">Generated graphic {imageProvider && <span className="text-[10px] text-muted font-normal ml-1">via {imageProvider}</span>}</h3>
               <div className="flex gap-2">
                 <button onClick={downloadImage} disabled={!imageUrl} className="btn btn-sm btn-primary">⬇ Download PNG</button>
               </div>
@@ -290,7 +291,7 @@ export default function AiStudioPage() {
               {imageBusy ? (
                 <div className="text-center text-sm text-soft">
                   <div className="inline-block w-6 h-6 rounded-full border-2 border-brand border-t-transparent animate-spin mb-2" />
-                  <p>Generating image… (usually 5-15 seconds)</p>
+                  <p>Generating image… (FLUX usually finishes in 10-30s)</p>
                 </div>
               ) : imageUrl ? (
                 // eslint-disable-next-line @next/next/no-img-element
