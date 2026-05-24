@@ -83,18 +83,54 @@ BEGIN
 END $$;
 
 ------------------------------------------------------------
--- 3. Seed the 4 canonical accounts if the table is empty.
---    These IDs are stable so the account_select localStorage state survives
---    re-runs of the migration.
+-- 3. Make sure the 4 canonical accounts exist (insert if missing).
+--    Using WHERE NOT EXISTS instead of ON CONFLICT so we don't need a unique
+--    constraint on (platform, handle). Existing rows are left alone — their
+--    real synced data + UUID stay intact.
 ------------------------------------------------------------
 
-INSERT INTO public.connected_accounts (id, user_id, platform, handle, display_name, profile_type, status)
-VALUES
-  ('00000000-0000-0000-0000-000000000001', NULL, 'instagram', 'happilyjuju',  '@happilyjuju',  'Personal / Creator',          'needs_connection'),
-  ('00000000-0000-0000-0000-000000000002', NULL, 'instagram', 'judithbemnet', '@Judithbemnet', 'Professional / Personal Brand','needs_connection'),
-  ('00000000-0000-0000-0000-000000000003', NULL, 'instagram', 'mas.osx',      '@mas.osx',      'Brand / SaaS / Carnival Tech','needs_connection'),
-  ('00000000-0000-0000-0000-000000000004', NULL, 'linkedin',  'judithbemnet', 'judithbemnet',  'Professional LinkedIn Profile','needs_connection')
-ON CONFLICT (platform, handle) DO NOTHING;
+INSERT INTO public.connected_accounts (user_id, platform, handle, display_name, profile_type, status)
+SELECT NULL, 'instagram', 'happilyjuju', '@happilyjuju', 'Personal / Creator', 'needs_connection'
+WHERE NOT EXISTS (
+  SELECT 1 FROM public.connected_accounts WHERE platform = 'instagram' AND lower(handle) = 'happilyjuju'
+);
+
+INSERT INTO public.connected_accounts (user_id, platform, handle, display_name, profile_type, status)
+SELECT NULL, 'instagram', 'judithbemnet', '@Judithbemnet', 'Professional / Personal Brand', 'needs_connection'
+WHERE NOT EXISTS (
+  SELECT 1 FROM public.connected_accounts WHERE platform = 'instagram' AND lower(handle) = 'judithbemnet'
+);
+
+INSERT INTO public.connected_accounts (user_id, platform, handle, display_name, profile_type, status)
+SELECT NULL, 'instagram', 'mas.osx', '@mas.osx', 'Brand / SaaS / Carnival Tech', 'needs_connection'
+WHERE NOT EXISTS (
+  SELECT 1 FROM public.connected_accounts WHERE platform = 'instagram' AND lower(handle) = 'mas.osx'
+);
+
+INSERT INTO public.connected_accounts (user_id, platform, handle, display_name, profile_type, status)
+SELECT NULL, 'linkedin', 'judithbemnet', 'judithbemnet', 'Professional LinkedIn Profile', 'needs_connection'
+WHERE NOT EXISTS (
+  SELECT 1 FROM public.connected_accounts WHERE platform = 'linkedin' AND lower(handle) = 'judithbemnet'
+);
+
+------------------------------------------------------------
+-- 4. De-duplicate: if you previously had per-user rows, keep only the most
+--    recently-synced row per (platform, handle). Safe to re-run.
+------------------------------------------------------------
+
+WITH ranked AS (
+  SELECT
+    id,
+    platform,
+    lower(handle) AS h,
+    ROW_NUMBER() OVER (
+      PARTITION BY platform, lower(handle)
+      ORDER BY last_synced_at DESC NULLS LAST, created_at DESC NULLS LAST, id ASC
+    ) AS rn
+  FROM public.connected_accounts
+)
+DELETE FROM public.connected_accounts
+WHERE id IN (SELECT id FROM ranked WHERE rn > 1);
 
 ------------------------------------------------------------
 -- Done. After running this you can hard-refresh the deployed site; the
