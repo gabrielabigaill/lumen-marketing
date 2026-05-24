@@ -4,6 +4,7 @@ import { usePathname, useRouter } from 'next/navigation';
 import { useEffect, useState } from 'react';
 import { getActiveAccountId, setActiveAccountId, onAccountChange, clearActiveAccount } from '@/lib/store';
 import { createSupabaseBrowser } from '@/lib/supabase/client';
+import { LogoMark } from '@/components/Logo';
 
 const NAV = [
   { href: '/', label: 'Account Select', icon: 'M3 12l9-9 9 9M5 10v10h14V10' },
@@ -70,10 +71,10 @@ export default function Shell({ children }: { children: React.ReactNode }) {
     <div className="min-h-screen grid lg:grid-cols-[248px_1fr]">
       {/* Sidebar */}
       <aside className={`fixed lg:sticky inset-y-0 left-0 z-30 w-64 lg:w-auto bg-elev border-r border-line p-4 flex flex-col gap-4 transition-transform ${mobileNav ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'}`}>
-        <Link href="/" className="flex items-center gap-2 px-2 py-1 mb-2" onClick={() => setMobileNav(false)}>
-          <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-brand to-brand-2 grid place-items-center text-white font-bold">L</div>
-          <div>
-            <div className="font-bold text-base leading-tight">Lumen</div>
+        <Link href="/" className="flex items-center gap-2.5 px-2 py-1 mb-2 hover:opacity-90 transition-opacity" onClick={() => setMobileNav(false)}>
+          <LogoMark size={36} />
+          <div className="leading-tight">
+            <div className="font-bold text-base">Lumen</div>
             <div className="text-[11px] text-muted">Marketing Intelligence</div>
           </div>
         </Link>
