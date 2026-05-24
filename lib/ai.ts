@@ -1,14 +1,26 @@
-// Single reusable Claude service. Used by:
+// Single reusable AI service. Used by:
 //   - /api/ai/generate       (AI Studio)
 //   - /api/reports/generate  (AI summaries on reports)
 //
-// Uses raw fetch() against api.anthropic.com to avoid SDK + edge-runtime
-// header-stripping headaches. Same pattern as lib/apify.ts.
+// Provider chain (first available wins; on failure, falls through to next):
+//   1. Anthropic Claude   (ANTHROPIC_API_KEY)  — premium, paid
+//   2. OpenAI             (OPENAI_API_KEY)     — paid
+//   3. Groq               (GROQ_API_KEY)       — FREE, no credit card needed
+//
+// Groq exists as a backstop so AI Studio + Reports keep working even if the
+// paid providers run out of credit. Get a free key at console.groq.com.
+//
+// All calls use raw fetch() to avoid SDK + edge-runtime header issues.
 
 import type { AiKind, ConnectedAccount, AnalyticsSnapshot } from './types';
 
 const ANTHROPIC_BASE = 'https://api.anthropic.com/v1';
-export const DEFAULT_MODEL = process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-5';
+const OPENAI_BASE    = 'https://api.openai.com/v1';
+const GROQ_BASE      = 'https://api.groq.com/openai/v1';
+
+export const DEFAULT_ANTHROPIC_MODEL = process.env.ANTHROPIC_MODEL || 'claude-3-5-sonnet-20241022';
+export const DEFAULT_OPENAI_MODEL    = process.env.OPENAI_MODEL    || 'gpt-4o-mini';
+export const DEFAULT_GROQ_MODEL      = process.env.GROQ_MODEL      || 'llama-3.3-70b-versatile';
 
 export interface AccountContext {
   account: Pick<ConnectedAccount, 'platform' | 'handle' | 'display_name' | 'profile_type'>;
@@ -80,14 +92,22 @@ Output: (1) one-sentence concept, (2) tagline, (3) 3 narrative pillars, (4) hero
   workflow: () => `(removed)`,
 };
 
-/** Single-shot generation. Returns plain text. */
-export async function generate(input: GenerateInputs): Promise<{ text: string; tokens_in?: number; tokens_out?: number; model: string }> {
+// ---------- Providers ----------
+
+async function jsonOrThrow(res: Response, label: string): Promise<any> {
+  const text = await res.text();
+  let json: any;
+  try { json = text ? JSON.parse(text) : {}; } catch { json = { _raw: text.slice(0, 200) }; }
+  if (!res.ok) {
+    const msg = json?.error?.message ?? json?.error?.type ?? json?._raw ?? `${res.status} ${res.statusText}`;
+    throw new Error(`[${label}] ${res.status}: ${msg}`);
+  }
+  return json;
+}
+
+export async function callAnthropic(system: string, user: string, model: string) {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) throw new Error('ANTHROPIC_API_KEY is not configured');
-
-  const prompt = TEMPLATES[input.kind](input);
-  const model = DEFAULT_MODEL;
-
   const res = await fetch(`${ANTHROPIC_BASE}/messages`, {
     method: 'POST',
     headers: {
@@ -95,32 +115,74 @@ export async function generate(input: GenerateInputs): Promise<{ text: string; t
       'anthropic-version': '2023-06-01',
       'content-type': 'application/json',
     },
+    body: JSON.stringify({ model, max_tokens: 1400, system, messages: [{ role: 'user', content: user }] }),
+  });
+  const json = await jsonOrThrow(res, 'claude');
+  const text = (json?.content ?? []).map((c: any) => (c?.type === 'text' ? c.text : '')).join('\n').trim();
+  return { text, tokens_in: json?.usage?.input_tokens, tokens_out: json?.usage?.output_tokens, model: json?.model ?? model };
+}
+
+async function callOpenAICompatible(base: string, label: string, system: string, user: string, model: string, apiKey: string) {
+  const res = await fetch(`${base}/chat/completions`, {
+    method: 'POST',
+    headers: { 'authorization': `Bearer ${apiKey}`, 'content-type': 'application/json' },
     body: JSON.stringify({
       model,
       max_tokens: 1400,
-      system: systemPrompt(input),
-      messages: [{ role: 'user', content: prompt }],
+      messages: [
+        { role: 'system', content: system },
+        { role: 'user', content: user },
+      ],
     }),
   });
+  const json = await jsonOrThrow(res, label);
+  const text = json?.choices?.[0]?.message?.content ?? '';
+  return { text, tokens_in: json?.usage?.prompt_tokens, tokens_out: json?.usage?.completion_tokens, model: json?.model ?? model };
+}
 
-  const text = await res.text();
-  let json: any;
-  try { json = text ? JSON.parse(text) : {}; } catch { json = { _raw: text }; }
+export async function callOpenAI(system: string, user: string, model: string) {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) throw new Error('OPENAI_API_KEY is not configured');
+  return callOpenAICompatible(OPENAI_BASE, 'openai', system, user, model, apiKey);
+}
 
-  if (!res.ok) {
-    const msg = json?.error?.message ?? json?.error?.type ?? `${res.status} ${res.statusText}`;
-    throw new Error(`[claudev2] Anthropic ${res.status}: ${msg}`);
+export async function callGroq(system: string, user: string, model: string) {
+  const apiKey = process.env.GROQ_API_KEY;
+  if (!apiKey) throw new Error('GROQ_API_KEY is not configured');
+  return callOpenAICompatible(GROQ_BASE, 'groq', system, user, model, apiKey);
+}
+
+// ---------- Public API ----------
+
+interface ProviderAttempt { name: string; error: string }
+
+/** Single-shot generation. Cascades through providers, returns first success. */
+export async function generate(input: GenerateInputs): Promise<{ text: string; tokens_in?: number; tokens_out?: number; model: string; provider?: string; fallbacks?: ProviderAttempt[] }> {
+  const prompt = TEMPLATES[input.kind](input);
+  const system = systemPrompt(input);
+
+  const providers: Array<{ name: string; enabled: boolean; run: () => Promise<{ text: string; tokens_in?: number; tokens_out?: number; model: string }> }> = [
+    { name: 'anthropic', enabled: !!process.env.ANTHROPIC_API_KEY, run: () => callAnthropic(system, prompt, DEFAULT_ANTHROPIC_MODEL) },
+    { name: 'openai',    enabled: !!process.env.OPENAI_API_KEY,    run: () => callOpenAI(system, prompt, DEFAULT_OPENAI_MODEL) },
+    { name: 'groq',      enabled: !!process.env.GROQ_API_KEY,      run: () => callGroq(system, prompt, DEFAULT_GROQ_MODEL) },
+  ];
+
+  const enabled = providers.filter(p => p.enabled);
+  if (enabled.length === 0) {
+    throw new Error('No AI provider configured. Set ANTHROPIC_API_KEY, OPENAI_API_KEY, or GROQ_API_KEY.');
   }
 
-  const out = (json?.content ?? [])
-    .map((c: any) => (c?.type === 'text' ? c.text : ''))
-    .join('\n')
-    .trim();
+  const fallbacks: ProviderAttempt[] = [];
+  for (const p of enabled) {
+    try {
+      const out = await p.run();
+      return { ...out, provider: p.name, fallbacks };
+    } catch (err: any) {
+      fallbacks.push({ name: p.name, error: err?.message ?? String(err) });
+    }
+  }
 
-  return {
-    text: out,
-    tokens_in: json?.usage?.input_tokens,
-    tokens_out: json?.usage?.output_tokens,
-    model: json?.model ?? model,
-  };
+  // All providers failed.
+  const detail = fallbacks.map(f => `${f.name}: ${f.error}`).join(' | ');
+  throw new Error(`All AI providers failed. ${detail}`);
 }
