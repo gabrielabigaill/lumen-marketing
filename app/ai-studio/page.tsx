@@ -43,9 +43,11 @@ export default function AiStudioPage() {
   // Image output
   const [imageUrl, setImageUrl] = useState<string | null>(null);
   const [imageProvider, setImageProvider] = useState<string | null>(null);
+  const [enhancedPrompt, setEnhancedPrompt] = useState<string | null>(null);
   const [imageBusy, setImageBusy] = useState(false);
   const [imageErr, setImageErr] = useState<string | null>(null);
   const [aspect, setAspect] = useState<'1:1' | '9:16' | '16:9'>('1:1');
+  const [showEnhanced, setShowEnhanced] = useState(false);
 
   const tool = TOOLS.find(t => t.kind === kind)!;
   const isImageTool = tool.group === 'image';
@@ -67,15 +69,15 @@ export default function AiStudioPage() {
     finally { setLoading(false); }
   }
 
-  async function generateImage() {
-    setImageBusy(true); setImageErr(null); setImageUrl(null); setImageProvider(null);
+  async function generateImage(rawPrompt = false) {
+    setImageBusy(true); setImageErr(null); setImageUrl(null); setImageProvider(null); setEnhancedPrompt(null);
     try {
       const promptText = (topic || brief || '').trim();
       if (!promptText) throw new Error('Add a topic or brief first.');
       const res = await fetch('/api/ai/image', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt: promptText, aspect_ratio: aspect, account_id: id }),
+        body: JSON.stringify({ prompt: promptText, aspect_ratio: aspect, account_id: id, raw_prompt: rawPrompt }),
       });
       const ct = res.headers.get('content-type') ?? '';
       if (!ct.includes('application/json')) {
@@ -86,6 +88,7 @@ export default function AiStudioPage() {
       if (!res.ok || !data.image) throw new Error(data.error ?? 'Image generation failed');
       setImageUrl(data.image);
       setImageProvider(data.provider ?? null);
+      setEnhancedPrompt(data.enhanced_prompt ?? null);
     } catch (e: any) { setImageErr(e?.message ?? 'Image generation failed'); }
     finally { setImageBusy(false); }
   }
@@ -266,15 +269,21 @@ export default function AiStudioPage() {
                 </div>
               </div>
               <div className="flex gap-2 pt-2">
-                <button onClick={generateImage} disabled={imageBusy} className="btn btn-primary flex-1 justify-center">
-                  {imageBusy ? 'Generating image…' : '✨ Generate graphic'}
+                <button onClick={() => generateImage(false)} disabled={imageBusy} className="btn btn-primary flex-1 justify-center">
+                  {imageBusy ? 'Generating image…' : '✨ Generate (enhanced)'}
                 </button>
-                <button onClick={() => { setImageUrl(null); setImageErr(null); }} className="btn btn-danger">Clear</button>
+                <button onClick={() => generateImage(true)}  disabled={imageBusy} className="btn">
+                  Raw prompt
+                </button>
+                <button onClick={() => { setImageUrl(null); setImageErr(null); setEnhancedPrompt(null); }} className="btn btn-danger">Clear</button>
               </div>
-              <p className="text-[10px] text-muted">
-                Default provider: <strong>Pollinations.ai</strong> (FLUX.1) — free, no key required.
-                Add <code className="bg-bg px-1 rounded">HF_TOKEN</code> for higher-quality FLUX via Hugging Face, or
-                <code className="bg-bg px-1 rounded ml-1">GEMINI_API_KEY</code> (paid tier) for Imagen.
+              <p className="text-[10px] text-muted leading-relaxed">
+                <strong>How it works:</strong> Your brief is first rewritten by Llama 3.3 (Groq, free) into a detailed FLUX
+                prompt with composition, lighting, color, and style cues — that's how we get magazine-quality output without
+                paying for Nano Banana. Click <em>Raw prompt</em> to skip enhancement and use your exact words.
+                For even higher quality, add <code className="bg-bg px-1 rounded">TOGETHER_API_KEY</code> (free at
+                {' '}<a className="text-brand underline" href="https://api.together.xyz" target="_blank" rel="noreferrer">together.ai</a>)
+                — the cascade will try Together FLUX-schnell-Free if Pollinations falters.
               </p>
             </div>
           </div>
@@ -300,6 +309,18 @@ export default function AiStudioPage() {
                 <span className="text-muted text-sm">Your generated graphic will appear here.</span>
               )}
             </div>
+            {enhancedPrompt && (
+              <details
+                className="mt-3 text-[11px]"
+                open={showEnhanced}
+                onToggle={e => setShowEnhanced((e.currentTarget as HTMLDetailsElement).open)}
+              >
+                <summary className="cursor-pointer text-muted hover:text-soft">
+                  {showEnhanced ? 'Hide' : 'Show'} the enhanced prompt FLUX received
+                </summary>
+                <pre className="mt-2 bg-bg border border-line rounded-lg p-3 whitespace-pre-wrap leading-relaxed text-soft">{enhancedPrompt}</pre>
+              </details>
+            )}
           </div>
         </div>
       )}
